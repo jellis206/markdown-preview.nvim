@@ -1,0 +1,61 @@
+name: Sync upstream biweekly
+
+on:
+  schedule:
+    - cron: '0 0 1,15 * *' # 1st and 15th of each month
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge upstream
+        id: sync
+        run: |
+          git remote add upstream https://github.com/iamcco/markdown-preview.nvim.git
+          git fetch upstream master
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "status=up_to_date" >> $GITHUB_OUTPUT
+          elif git merge upstream/master --no-edit; then
+            echo "status=merged" >> $GITHUB_OUTPUT
+          else
+            git merge --abort
+            echo "status=conflict" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push merged changes
+        if: steps.sync.outputs.status == 'merged'
+        run: git push origin master
+
+      - name: Open conflict issue
+        if: steps.sync.outputs.status == 'conflict'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'Upstream sync conflict: manual merge needed';
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'upstream-sync',
+            });
+            if (issues.some(i => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ['upstream-sync'],
+              body: `@${context.repo.owner} merging \`iamcco/markdown-preview.nvim\` master into this fork hit conflicts.\n\nResolve locally:\n\n\`\`\`sh\ngit fetch upstream master\ngit merge upstream/master   # resolve conflicts\ngit push origin master\n\`\`\``,
+            });
