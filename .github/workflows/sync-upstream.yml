@@ -1,61 +1,59 @@
-name: Sync upstream biweekly
+# Fork only: merge iamcco/markdown-preview.nvim master into this master on the 1st and 15th, keeping local commits on
+# top. No tests: the repo has no test suite. A clean merge is pushed; a conflict opens a PR from sync/upstream (upstream's master) instead, to resolve by hand;
+# while that PR is open, later runs leave its branch alone.
+# Upstream changes to .github/workflows can only be pushed with SYNC_TOKEN, a
+# token with contents, pull requests and workflows write; github.token can't.
+name: Sync upstream
 
 on:
   schedule:
-    - cron: '0 0 1,15 * *' # 1st and 15th of each month
+    - cron: "0 0 1,15 * *"
   workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      issues: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
+          ref: master
           fetch-depth: 0
-
-      - name: Configure git
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+      - name: Merge upstream master
+        id: merge
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Merge upstream
-        id: sync
-        run: |
-          git remote add upstream https://github.com/iamcco/markdown-preview.nvim.git
-          git fetch upstream master
-          if git merge-base --is-ancestor upstream/master HEAD; then
-            echo "status=up_to_date" >> $GITHUB_OUTPUT
-          elif git merge upstream/master --no-edit; then
-            echo "status=merged" >> $GITHUB_OUTPUT
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch https://github.com/iamcco/markdown-preview.nvim.git master
+          if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "Already up to date."
+            exit 0
+          fi
+          echo "upstream=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+          if git merge --no-edit FETCH_HEAD; then
+            echo "status=merged" >> "$GITHUB_OUTPUT"
           else
             git merge --abort
-            echo "status=conflict" >> $GITHUB_OUTPUT
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Push merged changes
-        if: steps.sync.outputs.status == 'merged'
+      - name: Push
+        if: steps.merge.outputs.status == 'merged'
         run: git push origin master
-
-      - name: Open conflict issue
-        if: steps.sync.outputs.status == 'conflict'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const title = 'Upstream sync conflict: manual merge needed';
-            const { data: issues } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: 'upstream-sync',
-            });
-            if (issues.some(i => i.title === title)) return;
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title,
-              labels: ['upstream-sync'],
-              body: `@${context.repo.owner} merging \`iamcco/markdown-preview.nvim\` master into this fork hit conflicts.\n\nResolve locally:\n\n\`\`\`sh\ngit fetch upstream master\ngit merge upstream/master   # resolve conflicts\ngit push origin master\n\`\`\``,
-            });
+      - name: Open PR
+        if: steps.merge.outputs.status == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+        run: |
+          open=$(gh pr list --repo "$GITHUB_REPOSITORY" --head sync/upstream --state open --json number --jq length)
+          if [ "$open" != 0 ]; then
+            echo "A sync/upstream PR is already open."
+            exit 0
+          fi
+          git push --force origin "${{ steps.merge.outputs.upstream }}:refs/heads/sync/upstream"
+          gh pr create --repo "$GITHUB_REPOSITORY" --base master --head sync/upstream \
+            --title "Sync iamcco/markdown-preview.nvim master" \
+            --body "Upstream iamcco/markdown-preview.nvim@master conflicts with master. Resolve here, then merge. Opened by .github/workflows/sync-upstream.yml."
